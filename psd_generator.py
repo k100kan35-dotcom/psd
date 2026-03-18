@@ -251,7 +251,7 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='linear', window='none', use_top_psd=False,
+    def compute_psd(self, detrend='linear', window='multitaper', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
                     correction_factor=1.1615, n_bins=88,
                     welch_nperseg=None, welch_overlap=0.5):
@@ -277,6 +277,8 @@ class PSDComputer:
         if window == 'welch':
             q_pos, C1D = self._compute_1d_psd_welch(
                 h, nperseg=welch_nperseg, overlap=welch_overlap)
+        elif window == 'multitaper':
+            q_pos, C1D = self._compute_1d_psd_multitaper(h)
         else:
             h_w = self._apply_window(h, window_type=window)
             q_pos, C1D = self._compute_1d_psd(h_w)
@@ -365,6 +367,37 @@ class PSDComputer:
         mask = q > 0
         return q[mask], C1D_accum[mask]
 
+    def _compute_1d_psd_multitaper(self, h):
+        """Multi-window PSD: average FFTs with different window functions.
+
+        Uses rectangular, Hanning, Hamming, and Blackman windows on the
+        full-length profile. Averaging across windows reduces spectral
+        leakage while preserving full frequency resolution (unlike Welch
+        which shortens segments).
+        """
+        N = len(h)
+        dx = self.dx
+        norm = dx / (2.0 * np.pi * N)
+        freqs = fftfreq(N, d=dx)
+        q = 2.0 * np.pi * freqs
+
+        windows = [
+            np.ones(N),            # rectangular
+            np.hanning(N),
+            np.hamming(N),
+            np.blackman(N),
+        ]
+
+        C1D_sum = np.zeros(N)
+        for w in windows:
+            energy_corr = np.sqrt(N / np.sum(w ** 2))
+            H_fft = fft(h * w * energy_corr)
+            C1D_sum += norm * np.abs(H_fft) ** 2
+        C1D_avg = C1D_sum / len(windows)
+
+        mask = q > 0
+        return q[mask], C1D_avg[mask]
+
     def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
         if method == 'standard':
             return C1D / (np.pi * q) * corr
@@ -376,15 +409,13 @@ class PSDComputer:
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
-        """Persson-style adaptive log-binning.
+        """Persson-style adaptive log-binning with low-q smoothing.
 
         At low q where the FFT frequency spacing > desired log-bin width,
-        each FFT frequency gets its own bin (no averaging of sparse data).
-        At higher q where many FFT points fall in each bin, log-uniform
-        averaging is used.
-
-        This ensures all data points are represented and n_bins is a
-        *target* that is approximately met.
+        each FFT frequency gets its own bin but with local log-space
+        smoothing (geometric mean of ±neighbors) to reduce periodogram
+        noise.  At higher q where many FFT points fall in each bin,
+        log-uniform averaging is used.
         """
         log_q = np.log10(q)
         lq_min, lq_max = log_q.min(), log_q.max()
@@ -395,6 +426,7 @@ class PSDComputer:
         q_s = q[idx]
         C_s = C[idx]
         lq_s = np.log10(q_s)
+        lC_s = np.log10(np.maximum(C_s, 1e-50))
 
         # Phase 1: Individual FFT points at low-q where spacing > target bin width
         bin_q = []
@@ -403,7 +435,6 @@ class PSDComputer:
         for i in range(len(q_s) - 1):
             spacing = lq_s[i + 1] - lq_s[i]
             if spacing > target_dlogq * 0.7:
-                # This FFT point gets its own bin
                 if C_s[i] > 0:
                     bin_q.append(q_s[i])
                     bin_C.append(C_s[i])
@@ -454,8 +485,8 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'linear',
                                   ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
-                                 ['none', 'welch', 'hanning', 'hamming', 'blackman'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
+                                 ['multitaper', 'none', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
