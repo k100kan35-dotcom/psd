@@ -1091,7 +1091,7 @@ class EnsembleTab:
         n_show = min(100, len(self.samples))
         for i in range(n_show):
             self.ax_ens.plot(lq, np.log10(self.samples[i]),
-                             color='steelblue', alpha=0.06, lw=0.5)
+                             color='steelblue', alpha=0.15, lw=0.7)
 
         # Originals (grey)
         for i in range(self.C_matrix.shape[0]):
