@@ -16,7 +16,7 @@ import csv
 import numpy as np
 
 # numpy >= 2.0 renamed trapz → trapezoid
-_trapz = getattr(np, 'trapezoid', None) or _trapz
+_trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
