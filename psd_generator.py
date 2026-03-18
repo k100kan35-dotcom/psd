@@ -251,18 +251,36 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='linear', window='none', use_top_psd=False,
+    def compute_psd(self, detrend='linear', window='welch', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
-                    correction_factor=1.1615, n_bins=88):
-        """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin."""
+                    correction_factor=1.1615, n_bins=88,
+                    welch_nperseg=None, welch_overlap=0.5):
+        """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
+
+        window : str
+            'none', 'hanning', 'hamming', 'blackman' — apply window then
+            single FFT over the full profile.
+            'welch' — Welch method: split into overlapping segments, apply
+            Hanning window to each, average their PSDs.
+        welch_nperseg : int or None
+            Segment length for Welch. None = N//8 (clamped to [64, N]).
+        welch_overlap : float
+            Overlap fraction for Welch segments (0–0.9). Default 0.5.
+        """
         if self.h_raw is None:
             raise ValueError("No profile loaded")
         h = self.h_raw.copy()
         h = self._detrend(h, method=detrend)
         if use_top_psd:
             h = self._top_profile(h)
-        h_w = self._apply_window(h, window_type=window)
-        q_pos, C1D = self._compute_1d_psd(h_w)
+
+        if window == 'welch':
+            q_pos, C1D = self._compute_1d_psd_welch(
+                h, nperseg=welch_nperseg, overlap=welch_overlap)
+        else:
+            h_w = self._apply_window(h, window_type=window)
+            q_pos, C1D = self._compute_1d_psd(h_w)
+
         C2D = self._convert_1d_to_2d(q_pos, C1D, method=conversion_method,
                                       H=hurst, corr=correction_factor)
         q_bin, C2D_bin = self._log_bin(q_pos, C2D, n_bins=n_bins)
@@ -310,6 +328,43 @@ class PSDComputer:
         mask = q > 0
         return q[mask], C1D[mask]
 
+    def _compute_1d_psd_welch(self, h, nperseg=None, overlap=0.5):
+        """Welch method: split h into overlapping Hanning-windowed segments,
+        compute PSD of each, and return the average."""
+        N = len(h)
+        dx = self.dx
+
+        # Determine segment length
+        if nperseg is None:
+            nperseg = max(64, N // 8)
+        nperseg = min(nperseg, N)
+
+        step = max(1, int(nperseg * (1 - overlap)))
+        w = np.hanning(nperseg)
+        # Window energy normalization
+        S1 = np.sum(w ** 2)
+
+        starts = list(range(0, N - nperseg + 1, step))
+        if not starts:
+            starts = [0]
+
+        C1D_accum = None
+        for s in starts:
+            seg = h[s:s + nperseg] * w
+            H_fft = fft(seg)
+            freqs = fftfreq(nperseg, d=dx)
+            q = 2.0 * np.pi * freqs
+            # Normalize: dx / (2π × S1) to account for window energy
+            C1D_seg = (dx / (2.0 * np.pi * S1)) * np.abs(H_fft) ** 2
+            if C1D_accum is None:
+                C1D_accum = C1D_seg.copy()
+            else:
+                C1D_accum += C1D_seg
+        C1D_accum /= len(starts)
+
+        mask = q > 0
+        return q[mask], C1D_accum[mask]
+
     def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
         if method == 'standard':
             return C1D / (np.pi * q) * corr
@@ -356,8 +411,8 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'linear',
                                   ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
-                                 ['none', 'hanning', 'hamming', 'blackman'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'welch',
+                                 ['welch', 'none', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
