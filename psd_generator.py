@@ -54,25 +54,29 @@ class PSDComputer:
         self.L = None
         self.unit_factor = 1e-6
 
-    def load_profile(self, filepath):
-        """Load road profile from IDADA-format file."""
+    def load_profile(self, filepath, x_unit='um', h_unit='um'):
+        """Load road profile with auto-format detection.
+
+        Supported formats:
+          1. IDADA format (5-line header + x h data)
+          2. Generic CSV: x,h two columns (comma/space/tab separated)
+             with or without a single header line
+
+        Parameters
+        ----------
+        filepath : str
+        x_unit : str   Unit of x values for generic CSV ('m', 'mm', 'um')
+        h_unit : str   Unit of h values for generic CSV ('m', 'mm', 'um')
+        """
+        self.profile_name = os.path.basename(filepath)
+
         with open(filepath, 'r') as f:
             lines = f.readlines()
 
-        self.profile_name = lines[0].strip()
-        n_points_header = int(lines[2].strip())
-        self.dx = float(lines[3].strip())
-        self.unit_factor = float(lines[4].strip())
-
-        h_list = []
-        for line in lines[5:]:
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                h_list.append(float(parts[1]))
-
-        self.h_raw = np.array(h_list) * self.unit_factor
-        self.N = len(self.h_raw)
-        self.L = self.N * self.dx
+        if self._try_load_idada(lines):
+            pass  # IDADA loaded successfully
+        else:
+            self._load_generic_csv(lines, x_unit, h_unit)
 
         return {
             'name': self.profile_name,
@@ -85,6 +89,134 @@ class PSDComputer:
             'q_min': 2 * np.pi / self.L,
             'q_max': np.pi / self.dx,
         }
+
+    def _try_load_idada(self, lines):
+        """Try parsing as IDADA format. Returns True on success."""
+        try:
+            if len(lines) < 6:
+                return False
+            name = lines[0].strip()
+            int(lines[1].strip())          # flag — must be int
+            n_pts = int(lines[2].strip())  # n_points — must be int
+            dx = float(lines[3].strip())   # dx in meters
+            uf = float(lines[4].strip())   # unit factor
+            # Sanity: dx should be a small positive number (meters)
+            if dx <= 0 or dx > 1:
+                return False
+            # Line 6+ should be "x h" pairs
+            parts = lines[5].strip().split()
+            if len(parts) < 2:
+                return False
+            float(parts[0]); float(parts[1])  # must be numeric
+
+            self.profile_name = name
+            self.dx = dx
+            self.unit_factor = uf
+            h_list = []
+            for line in lines[5:]:
+                p = line.strip().split()
+                if len(p) >= 2:
+                    h_list.append(float(p[1]))
+            self.h_raw = np.array(h_list) * self.unit_factor
+            self.N = len(self.h_raw)
+            self.L = self.N * self.dx
+            return True
+        except (ValueError, IndexError):
+            return False
+
+    @staticmethod
+    def _parse_unit_from_header(header_text):
+        """Extract unit from header like 'X(um)', 'Z(mm)', 'height(m)'."""
+        import re
+        m = re.search(r'\((um|mm|m)\)', header_text, re.IGNORECASE)
+        if m:
+            u = m.group(1).lower()
+            # 'um' also matches end of 'mm' sometimes; be explicit
+            return u
+        # Also try µm / micrometer patterns
+        if 'um' in header_text.lower() or 'µm' in header_text:
+            return 'um'
+        if 'mm' in header_text.lower():
+            return 'mm'
+        return None
+
+    def _load_generic_csv(self, lines, x_unit='um', h_unit='um'):
+        """Load generic two-column CSV with auto-detection of delimiter,
+        header units, and missing values.
+
+        Handles:
+          - Headers like 'X(um)  Z(um)' — auto-extracts units
+          - Rows where the second column is empty (skipped)
+          - Comma / tab / semicolon / space delimiters
+        """
+        unit_map = {'m': 1.0, 'mm': 1e-3, 'um': 1e-6}
+
+        # --- Detect delimiter from a data line near the end ---
+        delim = None
+        for candidate in ['\t', ',', ';']:
+            test = lines[-1].strip().split(candidate)
+            if len(test) >= 2:
+                try:
+                    float(test[0]); float(test[1])
+                    delim = candidate; break
+                except ValueError:
+                    continue
+        if delim is None:
+            # fallback: try space-separated
+            delim = None  # will use split() without arg (any whitespace)
+
+        def _split(line):
+            return line.strip().split(delim) if delim else line.strip().split()
+
+        # --- Check first line for header / units ---
+        first_parts = _split(lines[0])
+        if len(first_parts) >= 2:
+            try:
+                float(first_parts[0])
+            except ValueError:
+                # First line is a header — try extracting units
+                xu = self._parse_unit_from_header(first_parts[0])
+                hu = self._parse_unit_from_header(first_parts[1])
+                if xu:
+                    x_unit = xu
+                if hu:
+                    h_unit = hu
+
+        x_scale = unit_map.get(x_unit, 1e-6)
+        h_scale = unit_map.get(h_unit, 1e-6)
+
+        # --- Parse data, skip rows with missing h ---
+        x_list, h_list = [], []
+        for line in lines:
+            parts = _split(line)
+            if len(parts) < 2:
+                continue
+            # Skip if second column is empty string
+            if parts[1].strip() == '':
+                continue
+            try:
+                xv = float(parts[0])
+                hv = float(parts[1])
+                x_list.append(xv)
+                h_list.append(hv)
+            except ValueError:
+                continue  # skip header or non-numeric lines
+
+        if len(x_list) < 10:
+            raise ValueError(f"Too few valid data points ({len(x_list)})")
+
+        x_arr = np.array(x_list) * x_scale   # -> meters
+        h_arr = np.array(h_list) * h_scale    # -> meters
+
+        # Compute dx from x values (assume approximately uniform spacing)
+        dx_vals = np.diff(x_arr)
+        self.dx = np.median(np.abs(dx_vals))
+        if self.dx <= 0:
+            raise ValueError(f"Invalid spacing dx={self.dx}")
+
+        self.h_raw = h_arr
+        self.N = len(self.h_raw)
+        self.L = self.N * self.dx
 
     def compute_psd(self, detrend='linear', window='none', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
@@ -533,6 +665,24 @@ class EnsembleTab:
         ttk.Label(lf, textvariable=self.file_count_var,
                   font=('Consolas', 8)).pack(padx=5, pady=2)
 
+        # --- Data Units (for generic CSV files) ---
+        unit_lf = ttk.LabelFrame(sf, text="Data Units (auto-detect from header)")
+        unit_lf.pack(fill=tk.X, padx=5, pady=5)
+        row = ttk.Frame(unit_lf)
+        row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(row, text="X unit:").pack(side=tk.LEFT)
+        self.x_unit_var = tk.StringVar(value='um')
+        ttk.Combobox(row, textvariable=self.x_unit_var, width=6,
+                     values=['um', 'mm', 'm'], state='readonly').pack(side=tk.RIGHT)
+        row = ttk.Frame(unit_lf)
+        row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(row, text="H unit:").pack(side=tk.LEFT)
+        self.h_unit_var = tk.StringVar(value='um')
+        ttk.Combobox(row, textvariable=self.h_unit_var, width=6,
+                     values=['um', 'mm', 'm'], state='readonly').pack(side=tk.RIGHT)
+        ttk.Label(unit_lf, text="(IDADA format auto-detected, units ignored)",
+                  font=('Consolas', 7), foreground='gray').pack(padx=5, pady=1)
+
         ttk.Separator(sf, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=5, pady=8)
 
         # --- PSD Params ---
@@ -713,7 +863,9 @@ class EnsembleTab:
         for i, fpath in enumerate(self.file_paths):
             try:
                 comp = PSDComputer()
-                info = comp.load_profile(fpath)
+                info = comp.load_profile(fpath,
+                                         x_unit=self.x_unit_var.get(),
+                                         h_unit=self.h_unit_var.get())
                 q, C, *_ = comp.compute_psd(**params)
                 self.computers.append(comp)
                 self.psd_results.append((q, C))
