@@ -466,6 +466,37 @@ class PSDComputer:
 # Shared GUI helpers
 # ==============================================================================
 
+def _bind_mousewheel(canvas):
+    """Bind mousewheel scrolling to a canvas, handling enter/leave focus."""
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux(event):
+        if event.num == 4:
+            canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            canvas.yview_scroll(3, "units")
+
+    def _bind(event):
+        import sys
+        if sys.platform == 'linux':
+            canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+            canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+        else:
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _unbind(event):
+        import sys
+        if sys.platform == 'linux':
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+        else:
+            canvas.unbind_all("<MouseWheel>")
+
+    canvas.bind("<Enter>", _bind)
+    canvas.bind("<Leave>", _unbind)
+
+
 def _add_combo_row(parent, label_text, default, values):
     """Add label + combobox row, return StringVar."""
     row = ttk.Frame(parent)
@@ -575,14 +606,19 @@ class SinglePSDTab:
 
     # --- Controls ---
     def _build_controls(self, parent):
-        canvas = tk.Canvas(parent)
+        canvas = tk.Canvas(parent, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         sf = ttk.Frame(canvas)
         sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=sf, anchor="nw")
         canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Resize inner frame width to match canvas
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+            canvas.find_withtag("all")[0], width=e.width) if canvas.find_withtag("all") else None)
+        # Mousewheel scrolling
+        _bind_mousewheel(canvas)
 
         # Profile info
         lf = ttk.LabelFrame(sf, text="Profile Info")
@@ -800,14 +836,19 @@ class EnsembleTab:
     # ------------------------------------------------------------------
 
     def _build_controls(self, parent):
-        canvas = tk.Canvas(parent)
+        canvas = tk.Canvas(parent, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         sf = ttk.Frame(canvas)
         sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=sf, anchor="nw")
         canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Resize inner frame width to match canvas
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+            canvas.find_withtag("all")[0], width=e.width) if canvas.find_withtag("all") else None)
+        # Mousewheel scrolling
+        _bind_mousewheel(canvas)
 
         # --- File List ---
         lf = ttk.LabelFrame(sf, text="Profile Files")
