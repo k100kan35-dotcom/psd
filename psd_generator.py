@@ -1088,10 +1088,12 @@ class EnsembleTab:
         lq = np.log10(self.q_grid)
 
         # Generated samples (blue translucent)
-        n_show = min(100, len(self.samples))
+        n_show = len(self.samples)
+        # Scale alpha so dense regions don't saturate
+        alpha = max(0.03, min(0.15, 15.0 / n_show))
         for i in range(n_show):
             self.ax_ens.plot(lq, np.log10(self.samples[i]),
-                             color='steelblue', alpha=0.15, lw=0.7)
+                             color='steelblue', alpha=alpha, lw=0.5)
 
         # Originals (grey)
         for i in range(self.C_matrix.shape[0]):
