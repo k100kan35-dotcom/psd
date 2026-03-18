@@ -62,6 +62,8 @@ class PSDComputer:
           2. Generic CSV: x,h two columns (comma/space/tab separated)
              with or without a single header line
 
+        Handles encodings: UTF-8, CP949 (Korean Windows), EUC-KR, Latin-1.
+
         Parameters
         ----------
         filepath : str
@@ -70,8 +72,7 @@ class PSDComputer:
         """
         self.profile_name = os.path.basename(filepath)
 
-        with open(filepath, 'r') as f:
-            lines = f.readlines()
+        lines = self._read_with_encoding(filepath)
 
         if self._try_load_idada(lines):
             pass  # IDADA loaded successfully
@@ -89,6 +90,17 @@ class PSDComputer:
             'q_min': 2 * np.pi / self.L,
             'q_max': np.pi / self.dx,
         }
+
+    @staticmethod
+    def _read_with_encoding(filepath):
+        """Read file trying multiple encodings (UTF-8, CP949, EUC-KR, Latin-1)."""
+        for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'latin-1']:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    return f.readlines()
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        raise ValueError("Cannot decode file with any supported encoding")
 
     def _try_load_idada(self, lines):
         """Try parsing as IDADA format. Returns True on success."""
@@ -145,30 +157,41 @@ class PSDComputer:
         header units, and missing values.
 
         Handles:
-          - Headers like 'X(um)  Z(um)' — auto-extracts units
-          - Rows where the second column is empty (skipped)
-          - Comma / tab / semicolon / space delimiters
+          - Values wrapped in quotes: "123.45", "-678.9 "
+          - Headers like 'X(um)  Z(um)' or '"X(µm)","Z(µm)"'
+          - Rows where the second column is empty / '""' (skipped)
+          - Comma / tab / semicolon delimiters
+          - Windows line endings, BOM, trailing whitespace
         """
         unit_map = {'m': 1.0, 'mm': 1e-3, 'um': 1e-6}
 
-        # --- Detect delimiter by scanning multiple lines for a valid pair ---
-        delim = None
-        # Sample lines from various positions in the file
+        def _clean(s):
+            """Strip quotes, whitespace, BOM from a cell value."""
+            s = s.strip().strip('"').strip("'").strip()
+            # Remove BOM if present
+            s = s.lstrip('\ufeff')
+            return s
+
+        # --- Detect delimiter ---
+        # Sample lines from various positions
         sample_indices = set()
         for pos in [0.3, 0.5, 0.7]:
             sample_indices.add(min(int(len(lines) * pos), len(lines) - 1))
-        for candidate in ['\t', ',', ';']:
-            found = False
+
+        delim = None
+        for candidate in [',', '\t', ';']:
             for si in sample_indices:
                 parts = lines[si].strip().split(candidate)
-                if len(parts) >= 2 and parts[1].strip() != '':
-                    try:
-                        float(parts[0]); float(parts[1])
-                        found = True; break
-                    except ValueError:
-                        continue
-            if found:
-                delim = candidate; break
+                if len(parts) >= 2:
+                    v0, v1 = _clean(parts[0]), _clean(parts[1])
+                    if v1 != '':
+                        try:
+                            float(v0); float(v1)
+                            delim = candidate; break
+                        except ValueError:
+                            continue
+            if delim is not None:
+                break
         # fallback: any whitespace
         if delim is None:
             delim = None
@@ -179,12 +202,15 @@ class PSDComputer:
         # --- Check first line for header / units ---
         first_parts = _split(lines[0])
         if len(first_parts) >= 2:
+            h0, h1 = _clean(first_parts[0]), _clean(first_parts[1])
             try:
-                float(first_parts[0])
+                float(h0)
             except ValueError:
                 # First line is a header — try extracting units
-                xu = self._parse_unit_from_header(first_parts[0])
-                hu = self._parse_unit_from_header(first_parts[1])
+                # Also check raw text for µm / um patterns
+                raw_header = lines[0]
+                xu = self._parse_unit_from_header(h0) or self._parse_unit_from_header(raw_header)
+                hu = self._parse_unit_from_header(h1) or self._parse_unit_from_header(raw_header)
                 if xu:
                     x_unit = xu
                 if hu:
@@ -199,14 +225,13 @@ class PSDComputer:
             parts = _split(line)
             if len(parts) < 2:
                 continue
-            # Skip if second column is empty string
-            if parts[1].strip() == '':
+            v0, v1 = _clean(parts[0]), _clean(parts[1])
+            # Skip if second column is empty
+            if v1 == '':
                 continue
             try:
-                xv = float(parts[0])
-                hv = float(parts[1])
-                x_list.append(xv)
-                h_list.append(hv)
+                x_list.append(float(v0))
+                h_list.append(float(v1))
             except ValueError:
                 continue  # skip header or non-numeric lines
 
