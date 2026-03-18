@@ -251,7 +251,7 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='linear', window='welch', use_top_psd=False,
+    def compute_psd(self, detrend='linear', window='none', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
                     correction_factor=1.1615, n_bins=88,
                     welch_nperseg=None, welch_overlap=0.5):
@@ -376,16 +376,59 @@ class PSDComputer:
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
+        """Persson-style adaptive log-binning.
+
+        At low q where the FFT frequency spacing > desired log-bin width,
+        each FFT frequency gets its own bin (no averaging of sparse data).
+        At higher q where many FFT points fall in each bin, log-uniform
+        averaging is used.
+
+        This ensures all data points are represented and n_bins is a
+        *target* that is approximately met.
+        """
         log_q = np.log10(q)
-        edges = np.linspace(log_q.min(), log_q.max(), n_bins + 1)
-        centers = (edges[:-1] + edges[1:]) / 2.0
-        C_binned = np.full(n_bins, np.nan)
-        for i in range(n_bins):
-            mask = (log_q >= edges[i]) & (log_q < edges[i + 1])
-            if np.any(mask):
-                C_binned[i] = np.mean(C[mask])
-        valid = ~np.isnan(C_binned) & (C_binned > 0)
-        return 10.0 ** centers[valid], C_binned[valid]
+        lq_min, lq_max = log_q.min(), log_q.max()
+        target_dlogq = (lq_max - lq_min) / n_bins
+
+        # Sort q to identify FFT spacing
+        idx = np.argsort(q)
+        q_s = q[idx]
+        C_s = C[idx]
+        lq_s = np.log10(q_s)
+
+        # Phase 1: Individual FFT points at low-q where spacing > target bin width
+        bin_q = []
+        bin_C = []
+        i_transition = 0
+        for i in range(len(q_s) - 1):
+            spacing = lq_s[i + 1] - lq_s[i]
+            if spacing > target_dlogq * 0.7:
+                # This FFT point gets its own bin
+                if C_s[i] > 0:
+                    bin_q.append(q_s[i])
+                    bin_C.append(C_s[i])
+                i_transition = i + 1
+            else:
+                break
+
+        # Phase 2: Log-uniform bins for the dense region
+        if i_transition < len(q_s):
+            lq_start = lq_s[i_transition]
+            n_remaining = max(1, n_bins - len(bin_q))
+            edges = np.linspace(lq_start, lq_max, n_remaining + 1)
+            lq_tail = lq_s[i_transition:]
+            C_tail = C_s[i_transition:]
+            for j in range(n_remaining):
+                mask = (lq_tail >= edges[j]) & (lq_tail < edges[j + 1])
+                if j == n_remaining - 1:  # include right edge in last bin
+                    mask = (lq_tail >= edges[j]) & (lq_tail <= edges[j + 1])
+                if np.any(mask):
+                    avg_C = np.mean(C_tail[mask])
+                    if avg_C > 0:
+                        bin_q.append(10.0 ** ((edges[j] + edges[j + 1]) / 2.0))
+                        bin_C.append(avg_C)
+
+        return np.array(bin_q), np.array(bin_C)
 
 
 # ==============================================================================
@@ -411,8 +454,8 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'linear',
                                   ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'welch',
-                                 ['welch', 'none', 'hanning', 'hamming', 'blackman'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
+                                 ['none', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
