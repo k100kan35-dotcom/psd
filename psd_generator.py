@@ -151,19 +151,27 @@ class PSDComputer:
         """
         unit_map = {'m': 1.0, 'mm': 1e-3, 'um': 1e-6}
 
-        # --- Detect delimiter from a data line near the end ---
+        # --- Detect delimiter by scanning multiple lines for a valid pair ---
         delim = None
+        # Sample lines from various positions in the file
+        sample_indices = set()
+        for pos in [0.3, 0.5, 0.7]:
+            sample_indices.add(min(int(len(lines) * pos), len(lines) - 1))
         for candidate in ['\t', ',', ';']:
-            test = lines[-1].strip().split(candidate)
-            if len(test) >= 2:
-                try:
-                    float(test[0]); float(test[1])
-                    delim = candidate; break
-                except ValueError:
-                    continue
+            found = False
+            for si in sample_indices:
+                parts = lines[si].strip().split(candidate)
+                if len(parts) >= 2 and parts[1].strip() != '':
+                    try:
+                        float(parts[0]); float(parts[1])
+                        found = True; break
+                    except ValueError:
+                        continue
+            if found:
+                delim = candidate; break
+        # fallback: any whitespace
         if delim is None:
-            # fallback: try space-separated
-            delim = None  # will use split() without arg (any whitespace)
+            delim = None
 
         def _split(line):
             return line.strip().split(delim) if delim else line.strip().split()
@@ -878,8 +886,16 @@ class EnsembleTab:
 
         # Build common q grid
         valid = [r for r in self.psd_results if r is not None]
+        n_fail = sum(1 for r in self.psd_results if r is None)
         if len(valid) < 2:
-            messagebox.showerror("Error", "Need at least 2 valid PSDs")
+            # Collect error details for user
+            err_lines = [f"Valid: {len(valid)}, Failed: {n_fail}\n\n"]
+            info_content = self.info_text.get('1.0', tk.END)
+            for line in info_content.split('\n'):
+                if 'FAILED' in line:
+                    err_lines.append(line.strip() + '\n')
+            messagebox.showerror("Error",
+                                 "Need at least 2 valid PSDs\n\n" + "".join(err_lines[:10]))
             return
 
         q_min = max(r[0][0] for r in valid)
