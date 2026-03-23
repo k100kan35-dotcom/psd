@@ -328,7 +328,26 @@ class PSDComputer:
         q = 2.0 * np.pi * freqs
         C1D = (dx / (2.0 * np.pi * N)) * np.abs(H_fft) ** 2
         mask = q > 0
-        return q[mask], C1D[mask]
+        q_pos = q[mask]
+        C1D_pos = C1D[mask]
+        # Correct for sinc² rolloff from discrete sampling
+        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
+
+    @staticmethod
+    def _sinc2_correction(q, C1D):
+        """Compensate the sinc²(f·dx) attenuation from rectangular sampling.
+
+        The DFT of discretely-sampled data is attenuated by sinc²(f·dx)
+        where sinc(x)=sin(πx)/(πx). This becomes significant near the
+        Nyquist frequency, causing the PSD to drop off.
+        """
+        q_max = q.max()  # ≈ π/dx (Nyquist)
+        # x = f·dx = q/(2·q_Nyquist), so at Nyquist x=0.5
+        x = q / (2.0 * q_max)
+        sinc_val = np.where(x < 1e-10, 1.0, np.sin(np.pi * x) / (np.pi * x))
+        sinc2 = sinc_val ** 2
+        return C1D / sinc2
 
     def _compute_1d_psd_welch(self, h, nperseg=None, overlap=0.5):
         """Welch method: split h into overlapping Hanning-windowed segments,
@@ -365,7 +384,10 @@ class PSDComputer:
         C1D_accum /= len(starts)
 
         mask = q > 0
-        return q[mask], C1D_accum[mask]
+        q_pos = q[mask]
+        C1D_pos = C1D_accum[mask]
+        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
 
     def _compute_1d_psd_multitaper(self, h):
         """Multi-window PSD: average FFTs with different window functions.
@@ -396,7 +418,10 @@ class PSDComputer:
         C1D_avg = C1D_sum / len(windows)
 
         mask = q > 0
-        return q[mask], C1D_avg[mask]
+        q_pos = q[mask]
+        C1D_pos = C1D_avg[mask]
+        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
 
     def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
         if method == 'standard':
