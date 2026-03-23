@@ -56,8 +56,8 @@ def main():
         'detrend': 'linear',
         'window': 'none',
         'use_top_psd': False,
-        'conversion_method': 'standard',
-        'correction_factor': 1.1615,
+        'conversion_method': 'sqrt',
+        'correction_factor': 1.0,
         'n_bins': 88,
     }
 
