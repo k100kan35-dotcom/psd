@@ -253,7 +253,7 @@ class PSDComputer:
 
     def compute_psd(self, detrend='mean', window='none', use_top_psd=False,
                     conversion_method='sqrt', hurst=0.8,
-                    correction_factor=1.1615, n_bins=88,
+                    correction_factor=1.0, n_bins=88,
                     welch_nperseg=None, welch_overlap=0.5,
                     sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
@@ -457,16 +457,16 @@ class PSDComputer:
             C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
-    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.1615):
+    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.0):
         if method == 'none':
             return C1D.copy()
         elif method == 'standard':
             return C1D / (np.pi * q) * corr
         elif method == 'gamma':
             f = gamma_func(1.0 + H) / (np.sqrt(np.pi) * gamma_func(H + 0.5))
-            return (C1D / q) * f
+            return (C1D / q) * f * corr
         elif method == 'sqrt':
-            return (C1D / (np.pi * q)) * np.sqrt(1.0 + 3.0 * H)
+            return (C1D / (np.pi * q)) * np.sqrt(1.0 + 3.0 * H) * corr
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
@@ -599,7 +599,7 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(conv_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="Correction:").pack(side=tk.LEFT)
-    v['corr'] = tk.DoubleVar(value=1.1615)
+    v['corr'] = tk.DoubleVar(value=1.0)
     ttk.Entry(row, textvariable=v['corr'], width=10).pack(side=tk.RIGHT)
 
     row = ttk.Frame(conv_lf)
