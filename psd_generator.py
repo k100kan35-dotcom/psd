@@ -254,7 +254,8 @@ class PSDComputer:
     def compute_psd(self, detrend='linear', window='multitaper', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
                     correction_factor=1.1615, n_bins=88,
-                    welch_nperseg=None, welch_overlap=0.5):
+                    welch_nperseg=None, welch_overlap=0.5,
+                    sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
 
         window : str
@@ -266,27 +267,52 @@ class PSDComputer:
             Segment length for Welch. None = N//8 (clamped to [64, N]).
         welch_overlap : float
             Overlap fraction for Welch segments (0–0.9). Default 0.5.
+        sinc2_correct : bool
+            Apply sinc² rolloff compensation near Nyquist. Default False.
+            WARNING: enabling this amplifies high-q noise (~2.5× at Nyquist),
+            which can cause RMS slope and friction coefficient to explode.
+            Recommended OFF for Persson contact mechanics inputs.
         """
         if self.h_raw is None:
             raise ValueError("No profile loaded")
         h = self.h_raw.copy()
         h = self._detrend(h, method=detrend)
+        top_area_fraction = 1.0
         if use_top_psd:
-            h = self._top_profile(h)
+            h, top_area_fraction = self._top_profile(h)
 
         if window == 'welch':
             q_pos, C1D = self._compute_1d_psd_welch(
-                h, nperseg=welch_nperseg, overlap=welch_overlap)
+                h, nperseg=welch_nperseg, overlap=welch_overlap,
+                sinc2_correct=sinc2_correct)
         elif window == 'multitaper':
-            q_pos, C1D = self._compute_1d_psd_multitaper(h)
+            q_pos, C1D = self._compute_1d_psd_multitaper(
+                h, sinc2_correct=sinc2_correct)
         else:
             h_w = self._apply_window(h, window_type=window)
-            q_pos, C1D = self._compute_1d_psd(h_w)
+            q_pos, C1D = self._compute_1d_psd(h_w, sinc2_correct=sinc2_correct)
+
+        # Persson top-profile normalization: C_T = (A_0/A_T) * C
+        if use_top_psd and top_area_fraction > 0:
+            C1D = C1D / top_area_fraction
 
         C2D = self._convert_1d_to_2d(q_pos, C1D, method=conversion_method,
                                       H=hurst, corr=correction_factor)
         q_bin, C2D_bin = self._log_bin(q_pos, C2D, n_bins=n_bins)
         return q_bin, C2D_bin, q_pos, C1D, C2D
+
+    def verify_sum_rule(self, q_pos, C1D, h_detrended=None, detrend='linear'):
+        """Check Persson Sum Rule: 2 * ∫C₁D dq ≈ h_rms².
+
+        Returns (variance_from_psd, variance_from_profile, relative_error).
+        """
+        if h_detrended is None:
+            h_detrended = self._detrend(self.h_raw.copy(), method=detrend)
+        idx = np.argsort(q_pos)
+        var_psd = 2.0 * _trapz(C1D[idx], q_pos[idx])
+        var_profile = np.var(h_detrended)
+        rel_err = abs(var_psd - var_profile) / var_profile if var_profile > 0 else 0.0
+        return var_psd, var_profile, rel_err
 
     def _detrend(self, h, method='linear'):
         if method == 'mean':
@@ -300,10 +326,18 @@ class PSDComputer:
         return h
 
     def _top_profile(self, h):
+        """Extract top (asperity) profile and return area fraction.
+
+        Returns (h_top, area_fraction) where area_fraction = N_positive / N_total.
+        The caller must divide the PSD by area_fraction to satisfy Persson's
+        top-profile normalization: C_T = (A_0/A_T) * ...
+        """
         h_centered = h - np.mean(h)
         h_top = h_centered.copy()
+        n_positive = np.count_nonzero(h_top > 0)
         h_top[h_top < 0] = 0.0
-        return h_top
+        area_fraction = n_positive / len(h) if len(h) > 0 else 1.0
+        return h_top, area_fraction
 
     def _apply_window(self, h, window_type='none'):
         N = len(h)
@@ -320,7 +354,7 @@ class PSDComputer:
         correction = np.sqrt(N / np.sum(w ** 2))
         return h * w * correction
 
-    def _compute_1d_psd(self, h):
+    def _compute_1d_psd(self, h, sinc2_correct=False):
         N = self.N
         dx = self.dx
         H_fft = fft(h)
@@ -330,8 +364,8 @@ class PSDComputer:
         mask = q > 0
         q_pos = q[mask]
         C1D_pos = C1D[mask]
-        # Correct for sinc² rolloff from discrete sampling
-        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
     @staticmethod
@@ -349,7 +383,8 @@ class PSDComputer:
         sinc2 = sinc_val ** 2
         return C1D / sinc2
 
-    def _compute_1d_psd_welch(self, h, nperseg=None, overlap=0.5):
+    def _compute_1d_psd_welch(self, h, nperseg=None, overlap=0.5,
+                              sinc2_correct=False):
         """Welch method: split h into overlapping Hanning-windowed segments,
         compute PSD of each, and return the average."""
         N = len(h)
@@ -386,10 +421,11 @@ class PSDComputer:
         mask = q > 0
         q_pos = q[mask]
         C1D_pos = C1D_accum[mask]
-        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
-    def _compute_1d_psd_multitaper(self, h):
+    def _compute_1d_psd_multitaper(self, h, sinc2_correct=False):
         """Multi-window PSD: average FFTs with different window functions.
 
         Uses rectangular, Hanning, Hamming, and Blackman windows on the
@@ -420,7 +456,8 @@ class PSDComputer:
         mask = q > 0
         q_pos = q[mask]
         C1D_pos = C1D_avg[mask]
-        C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
     def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
@@ -550,6 +587,12 @@ def _build_psd_param_widgets(parent):
     v['top_psd'] = tk.BooleanVar(value=False)
     ttk.Checkbutton(row, variable=v['top_psd']).pack(side=tk.RIGHT)
 
+    row = ttk.Frame(pre_lf)
+    row.pack(fill=tk.X, padx=5, pady=2)
+    ttk.Label(row, text="sinc² correction:").pack(side=tk.LEFT)
+    v['sinc2_correct'] = tk.BooleanVar(value=False)
+    ttk.Checkbutton(row, variable=v['sinc2_correct']).pack(side=tk.RIGHT)
+
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
     conv_lf.pack(fill=tk.X, padx=5, pady=5)
     v['conv_method'] = _add_combo_row(conv_lf, "Method:", 'standard',
@@ -593,6 +636,7 @@ def _get_psd_params(v):
         'hurst': v['hurst'].get(),
         'correction_factor': v['corr'].get(),
         'n_bins': int(v['nbins'].get()),
+        'sinc2_correct': v['sinc2_correct'].get(),
     }
 
 
@@ -774,10 +818,16 @@ class SinglePSDTab:
             messagebox.showwarning("Warning", "No profile loaded!"); return
         self.status_var.set("Computing..."); self.root.update_idletasks()
         try:
-            q, C, *_ = self.computer.compute_psd(**_get_psd_params(self.pv))
+            q, C, q_raw, C1D_raw, C2D_raw = self.computer.compute_psd(
+                **_get_psd_params(self.pv))
             self.current_psd = (q, C)
             self._update_psd_plot(); self._update_stats(q, C)
-            self.status_var.set(f"Done: {len(q)} bins")
+            # Sum Rule verification
+            params = _get_psd_params(self.pv)
+            var_psd, var_prof, rel_err = self.computer.verify_sum_rule(
+                q_raw, C1D_raw, detrend=params['detrend'])
+            sr_msg = f"Done: {len(q)} bins | Sum Rule err: {rel_err:.1%}"
+            self.status_var.set(sr_msg)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
