@@ -576,7 +576,7 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'mean',
                                   ['mean', 'none', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
                                  ['none', 'multitaper', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
@@ -588,7 +588,7 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="sinc² correction:").pack(side=tk.LEFT)
-    v['sinc2_correct'] = tk.BooleanVar(value=False)
+    v['sinc2_correct'] = tk.BooleanVar(value=True)
     ttk.Checkbutton(row, variable=v['sinc2_correct']).pack(side=tk.RIGHT)
 
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
