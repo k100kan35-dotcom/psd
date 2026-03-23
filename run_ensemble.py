@@ -53,9 +53,10 @@ def main():
 
     # ----- PSD computation parameters (optional override) -----
     psd_params = {
-        'detrend': 'linear',
-        'window': 'none',
+        'detrend': 'mean',
+        'window': 'multitaper',
         'use_top_psd': False,
+        'sinc2_correct': True,
         'conversion_method': 'sqrt',
         'correction_factor': 1.8439,  # sqrt(1+3*0.8) for H=0.8
         'n_bins': 88,
