@@ -253,7 +253,7 @@ class PSDComputer:
 
     def compute_psd(self, detrend='mean', window='none', use_top_psd=False,
                     conversion_method='sqrt', hurst=0.8,
-                    correction_factor=1.1615, n_bins=88,
+                    correction_factor=1.0, n_bins=88,
                     welch_nperseg=None, welch_overlap=0.5,
                     sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
@@ -457,17 +457,17 @@ class PSDComputer:
             C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
-    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.1615):
+    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.0):
         if method == 'none':
             return C1D.copy()
-        elif method == 'standard':
-            return C1D / (np.pi * q) * corr
         elif method == 'gamma':
             f = gamma_func(1.0 + H) / (np.sqrt(np.pi) * gamma_func(H + 0.5))
-            return (C1D / q) * f
-        elif method == 'sqrt':
-            return (C1D / (np.pi * q)) * np.sqrt(1.0 + 3.0 * H)
-        return C1D / (np.pi * q) * corr
+            return (C1D / q) * f * corr
+        else:
+            # 'sqrt', 'standard', etc: C1D/(πq) × corr
+            # For sqrt: GUI auto-sets corr = √(1+3H)
+            # For standard: user sets corr manually
+            return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
         """Persson-style log-binning with geometric mean averaging.
@@ -599,8 +599,9 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(conv_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="Correction:").pack(side=tk.LEFT)
-    v['corr'] = tk.DoubleVar(value=1.1615)
-    ttk.Entry(row, textvariable=v['corr'], width=10).pack(side=tk.RIGHT)
+    v['corr'] = tk.DoubleVar(value=round(np.sqrt(1.0 + 3.0 * 0.8), 4))
+    corr_entry = ttk.Entry(row, textvariable=v['corr'], width=10)
+    corr_entry.pack(side=tk.RIGHT)
 
     row = ttk.Frame(conv_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
@@ -608,6 +609,24 @@ def _build_psd_param_widgets(parent):
     v['hurst'] = tk.DoubleVar(value=0.80)
     hlabel = ttk.Label(row, text="0.80", width=5)
     hlabel.pack(side=tk.RIGHT)
+
+    def _update_corr(*_args):
+        method = v['conv_method'].get()
+        if method == 'sqrt':
+            H = v['hurst'].get()
+            v['corr'].set(round(np.sqrt(1.0 + 3.0 * H), 4))
+            corr_entry.config(state='readonly')
+        elif method == 'gamma':
+            H = v['hurst'].get()
+            f = gamma_func(1.0 + H) / (np.sqrt(np.pi) * gamma_func(H + 0.5))
+            v['corr'].set(round(f, 4))
+            corr_entry.config(state='readonly')
+        else:
+            corr_entry.config(state='normal')
+
+    v['hurst'].trace_add('write', _update_corr)
+    v['conv_method'].trace_add('write', _update_corr)
+
     ttk.Scale(row, from_=0.1, to=1.0, variable=v['hurst'],
               orient=tk.HORIZONTAL,
               command=lambda val: hlabel.config(text=f"{float(val):.2f}")
