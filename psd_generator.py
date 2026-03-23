@@ -251,11 +251,11 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='none', window='multitaper', use_top_psd=False,
-                    conversion_method='standard', hurst=0.8,
+    def compute_psd(self, detrend='mean', window='none', use_top_psd=False,
+                    conversion_method='sqrt', hurst=0.8,
                     correction_factor=1.1615, n_bins=100,
                     welch_nperseg=None, welch_overlap=0.5,
-                    sinc2_correct=True):
+                    sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
 
         window : str
@@ -457,7 +457,7 @@ class PSDComputer:
             C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
-    def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
+    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.1615):
         if method == 'none':
             return C1D.copy()
         elif method == 'standard':
@@ -466,7 +466,7 @@ class PSDComputer:
             f = gamma_func(1.0 + H) / (np.sqrt(np.pi) * gamma_func(H + 0.5))
             return (C1D / q) * f
         elif method == 'sqrt':
-            return (C1D / q) * np.sqrt(1.0 + 3.0 * H)
+            return (C1D / (np.pi * q)) * np.sqrt(1.0 + 3.0 * H)
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
@@ -575,10 +575,10 @@ def _build_psd_param_widgets(parent):
     pre_lf.pack(fill=tk.X, padx=5, pady=5)
 
     v = {}
-    v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'none',
-                                  ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
-                                 ['multitaper', 'welch', 'none', 'hanning', 'hamming', 'blackman'])
+    v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'mean',
+                                  ['mean', 'none', 'linear', 'quadratic'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
+                                 ['none', 'multitaper', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
@@ -589,13 +589,13 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="sinc² correction:").pack(side=tk.LEFT)
-    v['sinc2_correct'] = tk.BooleanVar(value=True)
+    v['sinc2_correct'] = tk.BooleanVar(value=False)
     ttk.Checkbutton(row, variable=v['sinc2_correct']).pack(side=tk.RIGHT)
 
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
     conv_lf.pack(fill=tk.X, padx=5, pady=5)
-    v['conv_method'] = _add_combo_row(conv_lf, "Method:", 'standard',
-                                      ['standard', 'gamma', 'sqrt', 'none (C1D only)'])
+    v['conv_method'] = _add_combo_row(conv_lf, "Method:", 'sqrt',
+                                      ['sqrt', 'standard', 'gamma', 'none (C1D only)'])
 
     row = ttk.Frame(conv_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
