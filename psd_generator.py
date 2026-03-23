@@ -253,7 +253,7 @@ class PSDComputer:
 
     def compute_psd(self, detrend='mean', window='none', use_top_psd=False,
                     conversion_method='sqrt', hurst=0.8,
-                    correction_factor=1.1615, n_bins=100,
+                    correction_factor=1.1615, n_bins=88,
                     welch_nperseg=None, welch_overlap=0.5,
                     sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
@@ -470,13 +470,12 @@ class PSDComputer:
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
-        """Persson-style adaptive log-binning with low-q smoothing.
+        """Persson-style log-binning with geometric mean averaging.
 
-        At low q where the FFT frequency spacing > desired log-bin width,
-        each FFT frequency gets its own bin but with local log-space
-        smoothing (geometric mean of ±neighbors) to reduce periodogram
-        noise.  At higher q where many FFT points fall in each bin,
-        log-uniform averaging is used.
+        Uses geometric mean (average in log-space) which matches
+        Persson's 2D.RSG output.  At low q where the FFT frequency
+        spacing > desired log-bin width, each FFT frequency gets its
+        own bin.
         """
         log_q = np.log10(q)
         lq_min, lq_max = log_q.min(), log_q.max()
@@ -487,7 +486,6 @@ class PSDComputer:
         q_s = q[idx]
         C_s = C[idx]
         lq_s = np.log10(q_s)
-        lC_s = np.log10(np.maximum(C_s, 1e-50))
 
         # Phase 1: Individual FFT points at low-q where spacing > target bin width
         bin_q = []
@@ -503,22 +501,23 @@ class PSDComputer:
             else:
                 break
 
-        # Phase 2: Log-uniform bins for the dense region
+        # Phase 2: Log-uniform bins with geometric mean for the dense region
         if i_transition < len(q_s):
             lq_start = lq_s[i_transition]
             n_remaining = max(1, n_bins - len(bin_q))
             edges = np.linspace(lq_start, lq_max, n_remaining + 1)
             lq_tail = lq_s[i_transition:]
             C_tail = C_s[i_transition:]
+            lC_tail = np.log10(np.maximum(C_tail, 1e-50))
             for j in range(n_remaining):
                 mask = (lq_tail >= edges[j]) & (lq_tail < edges[j + 1])
                 if j == n_remaining - 1:  # include right edge in last bin
                     mask = (lq_tail >= edges[j]) & (lq_tail <= edges[j + 1])
                 if np.any(mask):
-                    avg_C = np.mean(C_tail[mask])
-                    if avg_C > 0:
+                    geo_C = 10.0 ** np.mean(lC_tail[mask])
+                    if geo_C > 0:
                         bin_q.append(10.0 ** ((edges[j] + edges[j + 1]) / 2.0))
-                        bin_C.append(avg_C)
+                        bin_C.append(geo_C)
 
         return np.array(bin_q), np.array(bin_C)
 
@@ -619,7 +618,7 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(bin_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="Log bins:").pack(side=tk.LEFT)
-    v['nbins'] = tk.IntVar(value=100)
+    v['nbins'] = tk.IntVar(value=88)
     ttk.Entry(row, textvariable=v['nbins'], width=6).pack(side=tk.RIGHT)
 
     return v
