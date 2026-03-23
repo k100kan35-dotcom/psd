@@ -251,11 +251,11 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='none', window='welch', use_top_psd=False,
+    def compute_psd(self, detrend='none', window='multitaper', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
                     correction_factor=1.1615, n_bins=100,
                     welch_nperseg=None, welch_overlap=0.5,
-                    sinc2_correct=False):
+                    sinc2_correct=True):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
 
         window : str
@@ -268,10 +268,7 @@ class PSDComputer:
         welch_overlap : float
             Overlap fraction for Welch segments (0–0.9). Default 0.5.
         sinc2_correct : bool
-            Apply sinc² rolloff compensation near Nyquist. Default False.
-            WARNING: enabling this amplifies high-q noise (~2.5× at Nyquist),
-            which can cause RMS slope and friction coefficient to explode.
-            Recommended OFF for Persson contact mechanics inputs.
+            Apply sinc² rolloff compensation near Nyquist. Default True.
         """
         if self.h_raw is None:
             raise ValueError("No profile loaded")
@@ -580,8 +577,8 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'none',
                                   ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'welch',
-                                 ['welch', 'multitaper', 'none', 'hanning', 'hamming', 'blackman'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
+                                 ['multitaper', 'welch', 'none', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
@@ -592,7 +589,7 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="sinc² correction:").pack(side=tk.LEFT)
-    v['sinc2_correct'] = tk.BooleanVar(value=False)
+    v['sinc2_correct'] = tk.BooleanVar(value=True)
     ttk.Checkbutton(row, variable=v['sinc2_correct']).pack(side=tk.RIGHT)
 
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
