@@ -251,9 +251,9 @@ class PSDComputer:
         self.N = len(self.h_raw)
         self.L = self.N * self.dx
 
-    def compute_psd(self, detrend='linear', window='multitaper', use_top_psd=False,
-                    conversion_method='standard', hurst=0.8,
-                    correction_factor=1.1615, n_bins=88,
+    def compute_psd(self, detrend='mean', window='none', use_top_psd=False,
+                    conversion_method='sqrt', hurst=0.8,
+                    correction_factor=1.1615, n_bins=100,
                     welch_nperseg=None, welch_overlap=0.5,
                     sinc2_correct=False):
         """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
@@ -268,10 +268,7 @@ class PSDComputer:
         welch_overlap : float
             Overlap fraction for Welch segments (0–0.9). Default 0.5.
         sinc2_correct : bool
-            Apply sinc² rolloff compensation near Nyquist. Default False.
-            WARNING: enabling this amplifies high-q noise (~2.5× at Nyquist),
-            which can cause RMS slope and friction coefficient to explode.
-            Recommended OFF for Persson contact mechanics inputs.
+            Apply sinc² rolloff compensation near Nyquist. Default True.
         """
         if self.h_raw is None:
             raise ValueError("No profile loaded")
@@ -460,14 +457,16 @@ class PSDComputer:
             C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
         return q_pos, C1D_pos
 
-    def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
-        if method == 'standard':
+    def _convert_1d_to_2d(self, q, C1D, method='sqrt', H=0.8, corr=1.1615):
+        if method == 'none':
+            return C1D.copy()
+        elif method == 'standard':
             return C1D / (np.pi * q) * corr
         elif method == 'gamma':
             f = gamma_func(1.0 + H) / (np.sqrt(np.pi) * gamma_func(H + 0.5))
             return (C1D / q) * f
         elif method == 'sqrt':
-            return (C1D / q) * np.sqrt(1.0 + 3.0 * H)
+            return (C1D / (np.pi * q)) * np.sqrt(1.0 + 3.0 * H)
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
@@ -576,10 +575,10 @@ def _build_psd_param_widgets(parent):
     pre_lf.pack(fill=tk.X, padx=5, pady=5)
 
     v = {}
-    v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'linear',
-                                  ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
-                                 ['multitaper', 'none', 'welch', 'hanning', 'hamming', 'blackman'])
+    v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'mean',
+                                  ['mean', 'none', 'linear', 'quadratic'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
+                                 ['none', 'multitaper', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
@@ -595,8 +594,8 @@ def _build_psd_param_widgets(parent):
 
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
     conv_lf.pack(fill=tk.X, padx=5, pady=5)
-    v['conv_method'] = _add_combo_row(conv_lf, "Method:", 'standard',
-                                      ['standard', 'gamma', 'sqrt'])
+    v['conv_method'] = _add_combo_row(conv_lf, "Method:", 'sqrt',
+                                      ['sqrt', 'standard', 'gamma', 'none (C1D only)'])
 
     row = ttk.Frame(conv_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
@@ -620,7 +619,7 @@ def _build_psd_param_widgets(parent):
     row = ttk.Frame(bin_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="Log bins:").pack(side=tk.LEFT)
-    v['nbins'] = tk.IntVar(value=88)
+    v['nbins'] = tk.IntVar(value=100)
     ttk.Entry(row, textvariable=v['nbins'], width=6).pack(side=tk.RIGHT)
 
     return v
@@ -628,11 +627,14 @@ def _build_psd_param_widgets(parent):
 
 def _get_psd_params(v):
     """Extract compute_psd kwargs from a param-var dict."""
+    conv = v['conv_method'].get()
+    if conv.startswith('none'):
+        conv = 'none'
     return {
         'detrend': v['detrend'].get(),
         'window': v['window'].get(),
         'use_top_psd': v['top_psd'].get(),
-        'conversion_method': v['conv_method'].get(),
+        'conversion_method': conv,
         'hurst': v['hurst'].get(),
         'correction_factor': v['corr'].get(),
         'n_bins': int(v['nbins'].get()),
@@ -851,8 +853,10 @@ class SinglePSDTab:
         p = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")])
         if p:
             q, C = self.current_psd
+            conv = _get_psd_params(self.pv)['conversion_method']
+            hdr = 'C_1D (m^3)' if conv == 'none' else 'C_2D (m^4)'
             with open(p, 'w', newline='') as f:
-                w = csv.writer(f); w.writerow(['q (1/m)', 'C_2D (m^4)'])
+                w = csv.writer(f); w.writerow(['q (1/m)', hdr])
                 for qi, ci in zip(q, C): w.writerow([f'{qi:.6E}', f'{ci:.6E}'])
 
     def _export_log(self):
