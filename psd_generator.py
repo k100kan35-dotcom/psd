@@ -54,25 +54,30 @@ class PSDComputer:
         self.L = None
         self.unit_factor = 1e-6
 
-    def load_profile(self, filepath):
-        """Load road profile from IDADA-format file."""
-        with open(filepath, 'r') as f:
-            lines = f.readlines()
+    def load_profile(self, filepath, x_unit='um', h_unit='um'):
+        """Load road profile with auto-format detection.
 
-        self.profile_name = lines[0].strip()
-        n_points_header = int(lines[2].strip())
-        self.dx = float(lines[3].strip())
-        self.unit_factor = float(lines[4].strip())
+        Supported formats:
+          1. IDADA format (5-line header + x h data)
+          2. Generic CSV: x,h two columns (comma/space/tab separated)
+             with or without a single header line
 
-        h_list = []
-        for line in lines[5:]:
-            parts = line.strip().split()
-            if len(parts) >= 2:
-                h_list.append(float(parts[1]))
+        Handles encodings: UTF-8, CP949 (Korean Windows), EUC-KR, Latin-1.
 
-        self.h_raw = np.array(h_list) * self.unit_factor
-        self.N = len(self.h_raw)
-        self.L = self.N * self.dx
+        Parameters
+        ----------
+        filepath : str
+        x_unit : str   Unit of x values for generic CSV ('m', 'mm', 'um')
+        h_unit : str   Unit of h values for generic CSV ('m', 'mm', 'um')
+        """
+        self.profile_name = os.path.basename(filepath)
+
+        lines = self._read_with_encoding(filepath)
+
+        if self._try_load_idada(lines):
+            pass  # IDADA loaded successfully
+        else:
+            self._load_generic_csv(lines, x_unit, h_unit)
 
         return {
             'name': self.profile_name,
@@ -86,22 +91,228 @@ class PSDComputer:
             'q_max': np.pi / self.dx,
         }
 
-    def compute_psd(self, detrend='linear', window='none', use_top_psd=False,
+    @staticmethod
+    def _read_with_encoding(filepath):
+        """Read file trying multiple encodings (UTF-8, CP949, EUC-KR, Latin-1)."""
+        for enc in ['utf-8-sig', 'utf-8', 'cp949', 'euc-kr', 'latin-1']:
+            try:
+                with open(filepath, 'r', encoding=enc) as f:
+                    return f.readlines()
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        raise ValueError("Cannot decode file with any supported encoding")
+
+    def _try_load_idada(self, lines):
+        """Try parsing as IDADA format. Returns True on success."""
+        try:
+            if len(lines) < 6:
+                return False
+            name = lines[0].strip()
+            int(lines[1].strip())          # flag — must be int
+            n_pts = int(lines[2].strip())  # n_points — must be int
+            dx = float(lines[3].strip())   # dx in meters
+            uf = float(lines[4].strip())   # unit factor
+            # Sanity: dx should be a small positive number (meters)
+            if dx <= 0 or dx > 1:
+                return False
+            # Line 6+ should be "x h" pairs
+            parts = lines[5].strip().split()
+            if len(parts) < 2:
+                return False
+            float(parts[0]); float(parts[1])  # must be numeric
+
+            self.profile_name = name
+            self.dx = dx
+            self.unit_factor = uf
+            h_list = []
+            for line in lines[5:]:
+                p = line.strip().split()
+                if len(p) >= 2:
+                    h_list.append(float(p[1]))
+            self.h_raw = np.array(h_list) * self.unit_factor
+            self.N = len(self.h_raw)
+            self.L = self.N * self.dx
+            return True
+        except (ValueError, IndexError):
+            return False
+
+    @staticmethod
+    def _parse_unit_from_header(header_text):
+        """Extract unit from header like 'X(um)', 'Z(mm)', 'height(m)'."""
+        import re
+        m = re.search(r'\((um|mm|m)\)', header_text, re.IGNORECASE)
+        if m:
+            u = m.group(1).lower()
+            # 'um' also matches end of 'mm' sometimes; be explicit
+            return u
+        # Also try µm / micrometer patterns
+        if 'um' in header_text.lower() or 'µm' in header_text:
+            return 'um'
+        if 'mm' in header_text.lower():
+            return 'mm'
+        return None
+
+    def _load_generic_csv(self, lines, x_unit='um', h_unit='um'):
+        """Load generic two-column CSV with auto-detection of delimiter,
+        header units, and missing values.
+
+        Handles:
+          - Values wrapped in quotes: "123.45", "-678.9 "
+          - Headers like 'X(um)  Z(um)' or '"X(µm)","Z(µm)"'
+          - Rows where the second column is empty / '""' (skipped)
+          - Comma / tab / semicolon delimiters
+          - Windows line endings, BOM, trailing whitespace
+        """
+        unit_map = {'m': 1.0, 'mm': 1e-3, 'um': 1e-6}
+
+        def _clean(s):
+            """Strip quotes, whitespace, BOM from a cell value."""
+            s = s.strip().strip('"').strip("'").strip()
+            # Remove BOM if present
+            s = s.lstrip('\ufeff')
+            return s
+
+        # --- Detect delimiter ---
+        # Sample lines from various positions
+        sample_indices = set()
+        for pos in [0.3, 0.5, 0.7]:
+            sample_indices.add(min(int(len(lines) * pos), len(lines) - 1))
+
+        delim = None
+        for candidate in [',', '\t', ';']:
+            for si in sample_indices:
+                parts = lines[si].strip().split(candidate)
+                if len(parts) >= 2:
+                    v0, v1 = _clean(parts[0]), _clean(parts[1])
+                    if v1 != '':
+                        try:
+                            float(v0); float(v1)
+                            delim = candidate; break
+                        except ValueError:
+                            continue
+            if delim is not None:
+                break
+        # fallback: any whitespace
+        if delim is None:
+            delim = None
+
+        def _split(line):
+            return line.strip().split(delim) if delim else line.strip().split()
+
+        # --- Check first line for header / units ---
+        first_parts = _split(lines[0])
+        if len(first_parts) >= 2:
+            h0, h1 = _clean(first_parts[0]), _clean(first_parts[1])
+            try:
+                float(h0)
+            except ValueError:
+                # First line is a header — try extracting units
+                # Also check raw text for µm / um patterns
+                raw_header = lines[0]
+                xu = self._parse_unit_from_header(h0) or self._parse_unit_from_header(raw_header)
+                hu = self._parse_unit_from_header(h1) or self._parse_unit_from_header(raw_header)
+                if xu:
+                    x_unit = xu
+                if hu:
+                    h_unit = hu
+
+        x_scale = unit_map.get(x_unit, 1e-6)
+        h_scale = unit_map.get(h_unit, 1e-6)
+
+        # --- Parse data, skip rows with missing h ---
+        x_list, h_list = [], []
+        for line in lines:
+            parts = _split(line)
+            if len(parts) < 2:
+                continue
+            v0, v1 = _clean(parts[0]), _clean(parts[1])
+            # Skip if second column is empty
+            if v1 == '':
+                continue
+            try:
+                x_list.append(float(v0))
+                h_list.append(float(v1))
+            except ValueError:
+                continue  # skip header or non-numeric lines
+
+        if len(x_list) < 10:
+            raise ValueError(f"Too few valid data points ({len(x_list)})")
+
+        x_arr = np.array(x_list) * x_scale   # -> meters
+        h_arr = np.array(h_list) * h_scale    # -> meters
+
+        # Compute dx from x values (assume approximately uniform spacing)
+        dx_vals = np.diff(x_arr)
+        self.dx = np.median(np.abs(dx_vals))
+        if self.dx <= 0:
+            raise ValueError(f"Invalid spacing dx={self.dx}")
+
+        self.h_raw = h_arr
+        self.N = len(self.h_raw)
+        self.L = self.N * self.dx
+
+    def compute_psd(self, detrend='linear', window='multitaper', use_top_psd=False,
                     conversion_method='standard', hurst=0.8,
-                    correction_factor=1.1615, n_bins=88):
-        """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin."""
+                    correction_factor=1.1615, n_bins=88,
+                    welch_nperseg=None, welch_overlap=0.5,
+                    sinc2_correct=False):
+        """Full PSD pipeline: detrend -> window -> FFT -> 1D->2D -> bin.
+
+        window : str
+            'none', 'hanning', 'hamming', 'blackman' — apply window then
+            single FFT over the full profile.
+            'welch' — Welch method: split into overlapping segments, apply
+            Hanning window to each, average their PSDs.
+        welch_nperseg : int or None
+            Segment length for Welch. None = N//8 (clamped to [64, N]).
+        welch_overlap : float
+            Overlap fraction for Welch segments (0–0.9). Default 0.5.
+        sinc2_correct : bool
+            Apply sinc² rolloff compensation near Nyquist. Default False.
+            WARNING: enabling this amplifies high-q noise (~2.5× at Nyquist),
+            which can cause RMS slope and friction coefficient to explode.
+            Recommended OFF for Persson contact mechanics inputs.
+        """
         if self.h_raw is None:
             raise ValueError("No profile loaded")
         h = self.h_raw.copy()
         h = self._detrend(h, method=detrend)
+        top_area_fraction = 1.0
         if use_top_psd:
-            h = self._top_profile(h)
-        h_w = self._apply_window(h, window_type=window)
-        q_pos, C1D = self._compute_1d_psd(h_w)
+            h, top_area_fraction = self._top_profile(h)
+
+        if window == 'welch':
+            q_pos, C1D = self._compute_1d_psd_welch(
+                h, nperseg=welch_nperseg, overlap=welch_overlap,
+                sinc2_correct=sinc2_correct)
+        elif window == 'multitaper':
+            q_pos, C1D = self._compute_1d_psd_multitaper(
+                h, sinc2_correct=sinc2_correct)
+        else:
+            h_w = self._apply_window(h, window_type=window)
+            q_pos, C1D = self._compute_1d_psd(h_w, sinc2_correct=sinc2_correct)
+
+        # Persson top-profile normalization: C_T = (A_0/A_T) * C
+        if use_top_psd and top_area_fraction > 0:
+            C1D = C1D / top_area_fraction
+
         C2D = self._convert_1d_to_2d(q_pos, C1D, method=conversion_method,
                                       H=hurst, corr=correction_factor)
         q_bin, C2D_bin = self._log_bin(q_pos, C2D, n_bins=n_bins)
         return q_bin, C2D_bin, q_pos, C1D, C2D
+
+    def verify_sum_rule(self, q_pos, C1D, h_detrended=None, detrend='linear'):
+        """Check Persson Sum Rule: 2 * ∫C₁D dq ≈ h_rms².
+
+        Returns (variance_from_psd, variance_from_profile, relative_error).
+        """
+        if h_detrended is None:
+            h_detrended = self._detrend(self.h_raw.copy(), method=detrend)
+        idx = np.argsort(q_pos)
+        var_psd = 2.0 * _trapz(C1D[idx], q_pos[idx])
+        var_profile = np.var(h_detrended)
+        rel_err = abs(var_psd - var_profile) / var_profile if var_profile > 0 else 0.0
+        return var_psd, var_profile, rel_err
 
     def _detrend(self, h, method='linear'):
         if method == 'mean':
@@ -115,10 +326,18 @@ class PSDComputer:
         return h
 
     def _top_profile(self, h):
+        """Extract top (asperity) profile and return area fraction.
+
+        Returns (h_top, area_fraction) where area_fraction = N_positive / N_total.
+        The caller must divide the PSD by area_fraction to satisfy Persson's
+        top-profile normalization: C_T = (A_0/A_T) * ...
+        """
         h_centered = h - np.mean(h)
         h_top = h_centered.copy()
+        n_positive = np.count_nonzero(h_top > 0)
         h_top[h_top < 0] = 0.0
-        return h_top
+        area_fraction = n_positive / len(h) if len(h) > 0 else 1.0
+        return h_top, area_fraction
 
     def _apply_window(self, h, window_type='none'):
         N = len(h)
@@ -135,7 +354,7 @@ class PSDComputer:
         correction = np.sqrt(N / np.sum(w ** 2))
         return h * w * correction
 
-    def _compute_1d_psd(self, h):
+    def _compute_1d_psd(self, h, sinc2_correct=False):
         N = self.N
         dx = self.dx
         H_fft = fft(h)
@@ -143,7 +362,103 @@ class PSDComputer:
         q = 2.0 * np.pi * freqs
         C1D = (dx / (2.0 * np.pi * N)) * np.abs(H_fft) ** 2
         mask = q > 0
-        return q[mask], C1D[mask]
+        q_pos = q[mask]
+        C1D_pos = C1D[mask]
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
+
+    @staticmethod
+    def _sinc2_correction(q, C1D):
+        """Compensate the sinc²(f·dx) attenuation from rectangular sampling.
+
+        The DFT of discretely-sampled data is attenuated by sinc²(f·dx)
+        where sinc(x)=sin(πx)/(πx). This becomes significant near the
+        Nyquist frequency, causing the PSD to drop off.
+        """
+        q_max = q.max()  # ≈ π/dx (Nyquist)
+        # x = f·dx = q/(2·q_Nyquist), so at Nyquist x=0.5
+        x = q / (2.0 * q_max)
+        sinc_val = np.where(x < 1e-10, 1.0, np.sin(np.pi * x) / (np.pi * x))
+        sinc2 = sinc_val ** 2
+        return C1D / sinc2
+
+    def _compute_1d_psd_welch(self, h, nperseg=None, overlap=0.5,
+                              sinc2_correct=False):
+        """Welch method: split h into overlapping Hanning-windowed segments,
+        compute PSD of each, and return the average."""
+        N = len(h)
+        dx = self.dx
+
+        # Determine segment length
+        if nperseg is None:
+            nperseg = max(64, N // 8)
+        nperseg = min(nperseg, N)
+
+        step = max(1, int(nperseg * (1 - overlap)))
+        w = np.hanning(nperseg)
+        # Window energy normalization
+        S1 = np.sum(w ** 2)
+
+        starts = list(range(0, N - nperseg + 1, step))
+        if not starts:
+            starts = [0]
+
+        C1D_accum = None
+        for s in starts:
+            seg = h[s:s + nperseg] * w
+            H_fft = fft(seg)
+            freqs = fftfreq(nperseg, d=dx)
+            q = 2.0 * np.pi * freqs
+            # Normalize: dx / (2π × S1) to account for window energy
+            C1D_seg = (dx / (2.0 * np.pi * S1)) * np.abs(H_fft) ** 2
+            if C1D_accum is None:
+                C1D_accum = C1D_seg.copy()
+            else:
+                C1D_accum += C1D_seg
+        C1D_accum /= len(starts)
+
+        mask = q > 0
+        q_pos = q[mask]
+        C1D_pos = C1D_accum[mask]
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
+
+    def _compute_1d_psd_multitaper(self, h, sinc2_correct=False):
+        """Multi-window PSD: average FFTs with different window functions.
+
+        Uses rectangular, Hanning, Hamming, and Blackman windows on the
+        full-length profile. Averaging across windows reduces spectral
+        leakage while preserving full frequency resolution (unlike Welch
+        which shortens segments).
+        """
+        N = len(h)
+        dx = self.dx
+        norm = dx / (2.0 * np.pi * N)
+        freqs = fftfreq(N, d=dx)
+        q = 2.0 * np.pi * freqs
+
+        windows = [
+            np.ones(N),            # rectangular
+            np.hanning(N),
+            np.hamming(N),
+            np.blackman(N),
+        ]
+
+        C1D_sum = np.zeros(N)
+        for w in windows:
+            energy_corr = np.sqrt(N / np.sum(w ** 2))
+            H_fft = fft(h * w * energy_corr)
+            C1D_sum += norm * np.abs(H_fft) ** 2
+        C1D_avg = C1D_sum / len(windows)
+
+        mask = q > 0
+        q_pos = q[mask]
+        C1D_pos = C1D_avg[mask]
+        if sinc2_correct:
+            C1D_pos = self._sinc2_correction(q_pos, C1D_pos)
+        return q_pos, C1D_pos
 
     def _convert_1d_to_2d(self, q, C1D, method='standard', H=0.8, corr=1.1615):
         if method == 'standard':
@@ -156,21 +471,93 @@ class PSDComputer:
         return C1D / (np.pi * q) * corr
 
     def _log_bin(self, q, C, n_bins=88):
+        """Persson-style adaptive log-binning with low-q smoothing.
+
+        At low q where the FFT frequency spacing > desired log-bin width,
+        each FFT frequency gets its own bin but with local log-space
+        smoothing (geometric mean of ±neighbors) to reduce periodogram
+        noise.  At higher q where many FFT points fall in each bin,
+        log-uniform averaging is used.
+        """
         log_q = np.log10(q)
-        edges = np.linspace(log_q.min(), log_q.max(), n_bins + 1)
-        centers = (edges[:-1] + edges[1:]) / 2.0
-        C_binned = np.full(n_bins, np.nan)
-        for i in range(n_bins):
-            mask = (log_q >= edges[i]) & (log_q < edges[i + 1])
-            if np.any(mask):
-                C_binned[i] = np.mean(C[mask])
-        valid = ~np.isnan(C_binned) & (C_binned > 0)
-        return 10.0 ** centers[valid], C_binned[valid]
+        lq_min, lq_max = log_q.min(), log_q.max()
+        target_dlogq = (lq_max - lq_min) / n_bins
+
+        # Sort q to identify FFT spacing
+        idx = np.argsort(q)
+        q_s = q[idx]
+        C_s = C[idx]
+        lq_s = np.log10(q_s)
+        lC_s = np.log10(np.maximum(C_s, 1e-50))
+
+        # Phase 1: Individual FFT points at low-q where spacing > target bin width
+        bin_q = []
+        bin_C = []
+        i_transition = 0
+        for i in range(len(q_s) - 1):
+            spacing = lq_s[i + 1] - lq_s[i]
+            if spacing > target_dlogq * 0.7:
+                if C_s[i] > 0:
+                    bin_q.append(q_s[i])
+                    bin_C.append(C_s[i])
+                i_transition = i + 1
+            else:
+                break
+
+        # Phase 2: Log-uniform bins for the dense region
+        if i_transition < len(q_s):
+            lq_start = lq_s[i_transition]
+            n_remaining = max(1, n_bins - len(bin_q))
+            edges = np.linspace(lq_start, lq_max, n_remaining + 1)
+            lq_tail = lq_s[i_transition:]
+            C_tail = C_s[i_transition:]
+            for j in range(n_remaining):
+                mask = (lq_tail >= edges[j]) & (lq_tail < edges[j + 1])
+                if j == n_remaining - 1:  # include right edge in last bin
+                    mask = (lq_tail >= edges[j]) & (lq_tail <= edges[j + 1])
+                if np.any(mask):
+                    avg_C = np.mean(C_tail[mask])
+                    if avg_C > 0:
+                        bin_q.append(10.0 ** ((edges[j] + edges[j + 1]) / 2.0))
+                        bin_C.append(avg_C)
+
+        return np.array(bin_q), np.array(bin_C)
 
 
 # ==============================================================================
 # Shared GUI helpers
 # ==============================================================================
+
+def _bind_mousewheel(canvas):
+    """Bind mousewheel scrolling to a canvas, handling enter/leave focus."""
+    def _on_mousewheel(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mousewheel_linux(event):
+        if event.num == 4:
+            canvas.yview_scroll(-3, "units")
+        elif event.num == 5:
+            canvas.yview_scroll(3, "units")
+
+    def _bind(event):
+        import sys
+        if sys.platform == 'linux':
+            canvas.bind_all("<Button-4>", _on_mousewheel_linux)
+            canvas.bind_all("<Button-5>", _on_mousewheel_linux)
+        else:
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+    def _unbind(event):
+        import sys
+        if sys.platform == 'linux':
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+        else:
+            canvas.unbind_all("<MouseWheel>")
+
+    canvas.bind("<Enter>", _bind)
+    canvas.bind("<Leave>", _unbind)
+
 
 def _add_combo_row(parent, label_text, default, values):
     """Add label + combobox row, return StringVar."""
@@ -191,14 +578,20 @@ def _build_psd_param_widgets(parent):
     v = {}
     v['detrend'] = _add_combo_row(pre_lf, "Detrend:", 'linear',
                                   ['none', 'mean', 'linear', 'quadratic'])
-    v['window'] = _add_combo_row(pre_lf, "Window:", 'none',
-                                 ['none', 'hanning', 'hamming', 'blackman'])
+    v['window'] = _add_combo_row(pre_lf, "Window:", 'multitaper',
+                                 ['multitaper', 'none', 'welch', 'hanning', 'hamming', 'blackman'])
 
     row = ttk.Frame(pre_lf)
     row.pack(fill=tk.X, padx=5, pady=2)
     ttk.Label(row, text="Top PSD:").pack(side=tk.LEFT)
     v['top_psd'] = tk.BooleanVar(value=False)
     ttk.Checkbutton(row, variable=v['top_psd']).pack(side=tk.RIGHT)
+
+    row = ttk.Frame(pre_lf)
+    row.pack(fill=tk.X, padx=5, pady=2)
+    ttk.Label(row, text="sinc² correction:").pack(side=tk.LEFT)
+    v['sinc2_correct'] = tk.BooleanVar(value=False)
+    ttk.Checkbutton(row, variable=v['sinc2_correct']).pack(side=tk.RIGHT)
 
     conv_lf = ttk.LabelFrame(parent, text="1D -> 2D Conversion")
     conv_lf.pack(fill=tk.X, padx=5, pady=5)
@@ -243,6 +636,7 @@ def _get_psd_params(v):
         'hurst': v['hurst'].get(),
         'correction_factor': v['corr'].get(),
         'n_bins': int(v['nbins'].get()),
+        'sinc2_correct': v['sinc2_correct'].get(),
     }
 
 
@@ -281,14 +675,19 @@ class SinglePSDTab:
 
     # --- Controls ---
     def _build_controls(self, parent):
-        canvas = tk.Canvas(parent)
+        canvas = tk.Canvas(parent, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         sf = ttk.Frame(canvas)
         sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=sf, anchor="nw")
         canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Resize inner frame width to match canvas
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+            canvas.find_withtag("all")[0], width=e.width) if canvas.find_withtag("all") else None)
+        # Mousewheel scrolling
+        _bind_mousewheel(canvas)
 
         # Profile info
         lf = ttk.LabelFrame(sf, text="Profile Info")
@@ -419,10 +818,16 @@ class SinglePSDTab:
             messagebox.showwarning("Warning", "No profile loaded!"); return
         self.status_var.set("Computing..."); self.root.update_idletasks()
         try:
-            q, C, *_ = self.computer.compute_psd(**_get_psd_params(self.pv))
+            q, C, q_raw, C1D_raw, C2D_raw = self.computer.compute_psd(
+                **_get_psd_params(self.pv))
             self.current_psd = (q, C)
             self._update_psd_plot(); self._update_stats(q, C)
-            self.status_var.set(f"Done: {len(q)} bins")
+            # Sum Rule verification
+            params = _get_psd_params(self.pv)
+            var_psd, var_prof, rel_err = self.computer.verify_sum_rule(
+                q_raw, C1D_raw, detrend=params['detrend'])
+            sr_msg = f"Done: {len(q)} bins | Sum Rule err: {rel_err:.1%}"
+            self.status_var.set(sr_msg)
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -506,14 +911,19 @@ class EnsembleTab:
     # ------------------------------------------------------------------
 
     def _build_controls(self, parent):
-        canvas = tk.Canvas(parent)
+        canvas = tk.Canvas(parent, highlightthickness=0)
         sb = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         sf = ttk.Frame(canvas)
         sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=sf, anchor="nw")
         canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         sb.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # Resize inner frame width to match canvas
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(
+            canvas.find_withtag("all")[0], width=e.width) if canvas.find_withtag("all") else None)
+        # Mousewheel scrolling
+        _bind_mousewheel(canvas)
 
         # --- File List ---
         lf = ttk.LabelFrame(sf, text="Profile Files")
@@ -532,6 +942,24 @@ class EnsembleTab:
         self.file_count_var = tk.StringVar(value="0 files loaded")
         ttk.Label(lf, textvariable=self.file_count_var,
                   font=('Consolas', 8)).pack(padx=5, pady=2)
+
+        # --- Data Units (for generic CSV files) ---
+        unit_lf = ttk.LabelFrame(sf, text="Data Units (auto-detect from header)")
+        unit_lf.pack(fill=tk.X, padx=5, pady=5)
+        row = ttk.Frame(unit_lf)
+        row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(row, text="X unit:").pack(side=tk.LEFT)
+        self.x_unit_var = tk.StringVar(value='um')
+        ttk.Combobox(row, textvariable=self.x_unit_var, width=6,
+                     values=['um', 'mm', 'm'], state='readonly').pack(side=tk.RIGHT)
+        row = ttk.Frame(unit_lf)
+        row.pack(fill=tk.X, padx=5, pady=2)
+        ttk.Label(row, text="H unit:").pack(side=tk.LEFT)
+        self.h_unit_var = tk.StringVar(value='um')
+        ttk.Combobox(row, textvariable=self.h_unit_var, width=6,
+                     values=['um', 'mm', 'm'], state='readonly').pack(side=tk.RIGHT)
+        ttk.Label(unit_lf, text="(IDADA format auto-detected, units ignored)",
+                  font=('Consolas', 7), foreground='gray').pack(padx=5, pady=1)
 
         ttk.Separator(sf, orient=tk.HORIZONTAL).pack(fill=tk.X, padx=5, pady=8)
 
@@ -713,7 +1141,9 @@ class EnsembleTab:
         for i, fpath in enumerate(self.file_paths):
             try:
                 comp = PSDComputer()
-                info = comp.load_profile(fpath)
+                info = comp.load_profile(fpath,
+                                         x_unit=self.x_unit_var.get(),
+                                         h_unit=self.h_unit_var.get())
                 q, C, *_ = comp.compute_psd(**params)
                 self.computers.append(comp)
                 self.psd_results.append((q, C))
@@ -726,8 +1156,16 @@ class EnsembleTab:
 
         # Build common q grid
         valid = [r for r in self.psd_results if r is not None]
+        n_fail = sum(1 for r in self.psd_results if r is None)
         if len(valid) < 2:
-            messagebox.showerror("Error", "Need at least 2 valid PSDs")
+            # Collect error details for user
+            err_lines = [f"Valid: {len(valid)}, Failed: {n_fail}\n\n"]
+            info_content = self.info_text.get('1.0', tk.END)
+            for line in info_content.split('\n'):
+                if 'FAILED' in line:
+                    err_lines.append(line.strip() + '\n')
+            messagebox.showerror("Error",
+                                 "Need at least 2 valid PSDs\n\n" + "".join(err_lines[:10]))
             return
 
         q_min = max(r[0][0] for r in valid)
@@ -895,10 +1333,12 @@ class EnsembleTab:
         lq = np.log10(self.q_grid)
 
         # Generated samples (blue translucent)
-        n_show = min(100, len(self.samples))
+        n_show = len(self.samples)
+        # Scale alpha so dense regions don't saturate
+        alpha = max(0.03, min(0.15, 15.0 / n_show))
         for i in range(n_show):
             self.ax_ens.plot(lq, np.log10(self.samples[i]),
-                             color='steelblue', alpha=0.06, lw=0.5)
+                             color='steelblue', alpha=alpha, lw=0.5)
 
         # Originals (grey)
         for i in range(self.C_matrix.shape[0]):
